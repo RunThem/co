@@ -11,9 +11,9 @@ extern "C" {
 #endif
 
 #define alignment16(a) ((a) & (~(16 - 1)))
-#define STACK_SIZE     8192
+#define STACK_SIZE     (7000)
 
-typedef void* co_arg_t;
+typedef const void* co_arg_t;
 typedef void (*co_func_t)(co_arg_t);
 
 void co_new(co_func_t func, co_arg_t arg);
