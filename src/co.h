@@ -15,14 +15,6 @@ extern "C" {
 
 typedef void* co_arg_t;
 typedef void (*co_func_t)(co_arg_t);
-typedef struct {
-  co_func_t func;
-  co_arg_t arg;
-  jmp_buf buf;
-  uint8_t stack[STACK_SIZE];
-  bool is_init;
-  size_t count;
-} co_t;
 
 void co_new(co_func_t func, co_arg_t arg);
 void co_yield ();
