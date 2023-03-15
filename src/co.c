@@ -29,6 +29,9 @@ static co_t* co_cur = NULL; /* runtime stack frame */
 
 static void co_exit_();
 
+static void rand_init(void);
+static uint64_t rand_next(void);
+
 void co_new(co_func_t func, void* arg) {
   co_t co = {.func = func, .arg = arg, .is_init = false, .id = ++co_count};
 
@@ -86,4 +89,34 @@ static void co_exit_() {
   }
 
   longjmp(co_main, 0);
+}
+
+/**
+ * xoshiro256+ https://prng.di.unimi.it/xoshiro256plus.c
+ **/
+static uint64_t rand_s[4];
+
+static void rand_init(void) {
+  srand(clock());
+  rand_s[0] = rand();
+  rand_s[1] = rand();
+  rand_s[2] = rand();
+  rand_s[3] = rand();
+}
+
+static inline uint64_t rand_next(void) {
+  const uint64_t result = rand_s[0] + rand_s[3];
+
+  const uint64_t t = rand_s[1] << 17;
+
+  rand_s[2] ^= rand_s[0];
+  rand_s[3] ^= rand_s[1];
+  rand_s[1] ^= rand_s[2];
+  rand_s[0] ^= rand_s[3];
+
+  rand_s[2] ^= t;
+
+  rand_s[3] = (rand_s[3] << 45) | (rand_s[3] >> 9);
+
+  return result;
 }
