@@ -21,16 +21,16 @@ void entry(co_arg_t _arg) {
 
   // sleep(1);
 
-  // printf("%s\n", arg);
-  // co_yield ();
+  printf("%s\n", arg);
+//  co_yield ();
 
-  // printf("[%s]\n", arg);
+  printf("[%s]\n", arg);
 }
 
 int main() {
   char buf[10] = {0};
 
-  for (int i = 0; i < 100; i++) {
+  for (int i = 1; i < 100; i++) {
     sprintf(buf, "%d", i);
 
     co_new(entry, (char*)strdup(buf));
