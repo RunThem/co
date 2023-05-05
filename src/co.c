@@ -9,7 +9,12 @@
 
 typedef struct {
   size_t id;
-  bool is_init;
+  enum status {
+    S_INIT,
+    S_RUN,
+    S_UP,
+    S_DEL,
+  } status;
 
   co_func_t func;
   co_arg_t arg;
@@ -43,17 +48,18 @@ void co_new(co_func_t func, co_arg_t arg) {
     co_pool.contexts = (co_t*)realloc(co_pool.contexts, co_pool.alloc * sizeof(co_t));
   }
 
-  co_t co = {.id      = ++co_count,
-             .is_init = false,
-             .func    = func,
-             .arg     = arg,
-             .stack   = (uint8_t*)calloc(sizeof(uint8_t), STACK_SIZE)};
+  co_t co = {.id     = ++co_count,
+             .status = S_INIT,
+             .func   = func,
+             .arg    = arg,
+             .stack  = (uint8_t*)calloc(sizeof(uint8_t), STACK_SIZE)};
 
   co_pool.contexts[co_pool.len++] = co;
 }
 
 void co_yield () {
   if (!setjmp(co_cur->buf)) {
+    co_cur->status = S_UP;
     longjmp(co_main, co_cur->id);
   }
 }
@@ -69,11 +75,11 @@ void co_loop() {
 
   do {
     co_cur = &co_pool.contexts[rand_next() % co_pool.len];
-  } while (co_pool.len > 1 && co_cur->id == id);
+  } while (co_pool.len > 1 && co_cur->id == id && co_cur->status != S_DEL);
 
-  if (!co_cur->is_init) {
-    co_cur->is_init = true;
-    void* stack     = (void*)(alignment16(((uintptr_t)co_cur->stack + STACK_SIZE)));
+  if (co_cur->status == S_INIT) {
+    co_cur->status = S_RUN;
+    void* stack    = (void*)(alignment16(((uintptr_t)co_cur->stack + STACK_SIZE)));
 
     asm volatile("movq %0, %%rsp;"
                  "movq %2, %%rdi;"
@@ -88,8 +94,10 @@ void co_loop() {
 }
 
 void co_exit() {
-  free(co_cur->stack);
-  *co_cur = co_pool.contexts[--co_pool.len];
+  // fprintf(stderr, "id is %ld, stack is %p\n", co_cur->id, co_cur->stack);
+
+  co_cur->status = S_DEL;
+  co_pool.len--;
 
   longjmp(co_main, 0);
 }

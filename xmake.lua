@@ -4,6 +4,8 @@ set_languages('gnu17')
 
 add_rules('mode.debug', 'mode.release')
 
+add_cflags('-ggdb')
+
 target('co', function()
   set_kind('static')
   add_files('src/co.c')
