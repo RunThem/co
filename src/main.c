@@ -14,15 +14,15 @@ void entry(co_arg_t _arg) {
 #if 0
   for (int i = 0; i < 2; i++) {
     // count++;
-    printf("%s\n", arg);
-    co_yield ();
+    // printf("%s\n", arg);
+    // co_yield ();
   }
 #endif
 
   // sleep(1);
 
-  printf("%s\n", arg);
-  co_yield ();
+  // printf("%s\n", arg);
+  // co_yield ();
 
   // printf("[%s]\n", arg);
 }

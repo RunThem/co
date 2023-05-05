@@ -2,10 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/time.h>
-#include <sys/types.h>
 #include <time.h>
-#include <unistd.h>
 
 typedef struct {
   size_t id;
@@ -46,6 +43,10 @@ void co_new(co_func_t func, co_arg_t arg) {
   } else if (co_pool.len == co_pool.alloc) {
     co_pool.alloc *= 2;
     co_pool.contexts = (co_t*)realloc(co_pool.contexts, co_pool.alloc * sizeof(co_t));
+    if (co_pool.contexts == NULL) {
+      fprintf(stderr, "out of memory\n");
+      return;
+    }
   }
 
   co_t co = {.id     = ++co_count,
@@ -60,26 +61,42 @@ void co_new(co_func_t func, co_arg_t arg) {
 void co_yield () {
   if (!setjmp(co_cur->buf)) {
     co_cur->status = S_UP;
-    longjmp(co_main, co_cur->id);
+    fprintf(stderr, "co yield, %ld\n", co_cur->id);
+    longjmp(co_main, (int)co_cur->id);
   }
 }
 
 void co_loop() {
-  rand_init();
+  srand(time(NULL));
+
   size_t id = setjmp(co_main);
 
+  if (id == 0) {
+    fprintf(stderr, "co end\n");
+  } else {
+    fprintf(stderr, "co loop, %ld\n", id);
+  }
+
+  fprintf(stderr, "pool len %ld\n", co_pool.len);
   if (co_pool.len == 0) {
     free(co_pool.contexts);
     return;
   }
 
   do {
-    co_cur = &co_pool.contexts[rand_next() % co_pool.len];
+    int idx = rand() % co_pool.len;
+    if (idx == 0) {
+      continue;
+    }
+
+    co_cur = &co_pool.contexts[idx];
   } while (co_pool.len > 1 && co_cur->id == id && co_cur->status != S_DEL);
+
+  fprintf(stderr, "run is %ld\n", co_cur->id);
 
   if (co_cur->status == S_INIT) {
     co_cur->status = S_RUN;
-    void* stack    = (void*)(alignment16(((uintptr_t)co_cur->stack + STACK_SIZE)));
+    void* stack    = (void*)(alignment16(((uintptr_t)co_cur->stack + STACK_SIZE - 16)));
 
     asm volatile("movq %0, %%rsp;"
                  "movq %2, %%rdi;"
@@ -91,10 +108,12 @@ void co_loop() {
   } else {
     longjmp(co_cur->buf, 1);
   }
+
+  fprintf(stderr, "stack error!\n");
 }
 
 void co_exit() {
-  // fprintf(stderr, "id is %ld, stack is %p\n", co_cur->id, co_cur->stack);
+  fprintf(stderr, "exit id %ld\n", co_cur->id);
 
   co_cur->status = S_DEL;
   co_pool.len--;
@@ -102,32 +121,9 @@ void co_exit() {
   longjmp(co_main, 0);
 }
 
-/**
- * xoshiro256+ https://prng.di.unimi.it/xoshiro256plus.c
- **/
-static uint64_t rand_s[4];
-
-static void rand_init(void) {
-  srand(time(NULL));
-  rand_s[0] = rand();
-  rand_s[1] = rand();
-  rand_s[2] = rand();
-  rand_s[3] = rand();
-}
-
-static inline uint64_t rand_next(void) {
-  const uint64_t result = rand_s[0] + rand_s[3];
-
-  const uint64_t t = rand_s[1] << 17;
-
-  rand_s[2] ^= rand_s[0];
-  rand_s[3] ^= rand_s[1];
-  rand_s[1] ^= rand_s[2];
-  rand_s[0] ^= rand_s[3];
-
-  rand_s[2] ^= t;
-
-  rand_s[3] = (rand_s[3] << 45) | (rand_s[3] >> 9);
-
-  return result;
+void co_show() {
+  for (size_t i = 0; i < co_pool.len; i++) {
+    co_t* co = &co_pool.contexts[i];
+    fprintf(stderr, "id is %ld, stack is %p\n", co->id, co->stack);
+  }
 }
