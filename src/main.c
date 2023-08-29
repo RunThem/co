@@ -6,39 +6,31 @@
 #include <time.h>
 #include <unistd.h>
 
-// int count = 0;
+int count = 0;
 
-void entry(co_arg_t _arg) {
-  char* arg = (char*)_arg;
+void co_1(co_arg_t _arg) {
+  count++;
+  co_yield ();
+}
 
-#if 0
-  for (int i = 0; i < 2; i++) {
-    // count++;
-    // printf("%s\n", arg);
-    // co_yield ();
+void co_2(co_arg_t _arg) {
+  for (int i = 0; i < 100; i++) {
+    co_new(co_1, NULL);
+
+    co_yield ();
   }
-#endif
 
-  // sleep(1);
-
-  printf("%s\n", arg);
-//  co_yield ();
-
-  printf("[%s]\n", arg);
+  co_yield ();
 }
 
 int main() {
-  char buf[10] = {0};
-
-  for (int i = 1; i < 100; i++) {
-    sprintf(buf, "%d", i);
-
-    co_new(entry, (char*)strdup(buf));
+  for (int i = 0; i < 100; i++) {
+    co_new(co_2, NULL);
   }
 
   co_loop();
 
-  // printf("count %d\n", count);
+  printf("%d", count);
 
   return 0;
 }

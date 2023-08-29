@@ -2,16 +2,22 @@
 
 #include "co.h"
 
-#include <cc.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+#if 1
+#  define die(fmt, ...)
+#else
+#  define die(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
+#endif
 
 typedef struct {
   size_t id;
   enum status {
     S_INIT,
     S_RUN,
+    S_END,
   } status;
 
   co_func_t func;
@@ -21,45 +27,54 @@ typedef struct {
   uint8_t stack[STACK_SIZE];
 } co_t;
 
-static struct {
-  cc_vec(co_t) contests;
-} co_pool;
+static co_t* co      = NULL;
+static size_t co_len = 0;
+static size_t co_cap = 100000;
 
-static size_t co_count = 1; /* a self-incrementing counter */
-static jmp_buf co_main;     /* scheduling stack */
-static co_t* co_cur = NULL; /* runtime stack frame */
+static jmp_buf co_main = {0};  /* scheduling stack */
+static co_t* co_cur    = NULL; /* runtime stack frame */
 
 static void co_exit();
 
 void co_new(co_func_t func, co_arg_t arg) {
-  if (co_pool.contests == NULL) {
-    cc_init(&co_pool.contests);
+  if (co == NULL) {
+    co = calloc(co_cap, sizeof(co_t));
   }
 
-  co_t co = {.id = co_count++, .status = S_INIT, .func = func, .arg = arg};
+  co[co_len].id     = co_len;
+  co[co_len].status = S_INIT;
+  co[co_len].func   = func;
+  co[co_len].arg    = arg;
 
-  cc_push(&co_pool.contests, co);
+  co_len++;
 }
 
 void co_yield () {
   if (!setjmp(co_cur->buf)) {
-    // fprintf(stderr, "co yield, %ld\n", co_cur->id);
     longjmp(co_main, (int)co_cur->id);
   }
 }
 
 void co_loop() {
-  srand(time(NULL));
-  size_t id = setjmp(co_main);
+  int flag = setjmp(co_main);
 
-  if (cc_size(&co_pool.contests) == 0) {
-    fprintf(stderr, "ok\n");
-    return;
+  if (flag == -1) {
+    die("%zu finished", co_cur->id);
   }
 
-  size_t idx = rand() % cc_size(&co_pool.contests);
-  fprintf(stderr, "idx is %ld\n", idx);
-  co_cur = cc_get(&co_pool.contests, idx);
+  co_cur = NULL;
+  for (size_t i = 0; i < co_len; i++) {
+    if (co[i].status != S_END) {
+      die("idx is %zu\n", i);
+      co_cur = &co[i];
+
+      break;
+    }
+  }
+
+  if (co_cur == NULL) {
+    return;
+  }
 
   if (co_cur->status == S_INIT) {
     co_cur->status = S_RUN;
@@ -78,6 +93,6 @@ void co_loop() {
 }
 
 void co_exit() {
-  cc_erase(&co_pool.contests, co_cur->id);
+  co_cur->status = S_END;
   longjmp(co_main, -1);
 }
