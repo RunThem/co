@@ -1,98 +1,117 @@
-#define CC_NO_SHORT_NAMES
-
 #include "co.h"
 
-#include <stdio.h>
-#include <string.h>
-#include <time.h>
+#include <setjmp.h>
+#include <threads.h>
 
-#if 1
-#  define die(fmt, ...)
-#else
-#  define die(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
-#endif
+/* libs */
+#include <u/core/queue.h>
+#include <u/core/stack.h>
+#include <u/u.h>
+
+typedef enum {
+  CO_STATUS_SUSPEND,
+  CO_STATUS_RUNNING,
+  CO_STATUS_DEAD,
+} co_status_e;
 
 typedef struct {
   size_t id;
-  enum status {
-    S_INIT,
-    S_RUN,
-    S_END,
-  } status;
+  co_status_e statue;
 
   co_func_t func;
   co_arg_t arg;
 
-  jmp_buf buf;
-  uint8_t stack[STACK_SIZE];
+  jmp_buf ctx;
+  uint8_t stack[CO_STACK_SIZE];
 } co_t;
 
-static co_t* co      = NULL;
-static size_t co_len = 0;
-static size_t co_cap = 100000;
+typedef struct {
+  size_t id;
 
-static jmp_buf co_main = {0};  /* scheduling stack */
-static co_t* co_cur    = NULL; /* runtime stack frame */
+  u_queue_t(co_t*) ready;
+  u_stack_t(co_t*) free;
+} co_loop_t;
 
-static void co_exit();
+static co_loop_t loop      = {0};
+static jmp_buf co_main_ctx = {0};  /* scheduling stack */
+static co_t* curr_co       = NULL; /* runtime stack frame */
+once_flag co_init_flag     = ONCE_FLAG_INIT;
+
+static void __co_init() {
+  loop.ready = u_queue_new(co_t*, CO_NUMS);
+  loop.free  = u_stack_new(co_t*, CO_NUMS);
+}
 
 void co_new(co_func_t func, co_arg_t arg) {
-  if (co == NULL) {
-    co = calloc(co_cap, sizeof(co_t));
+  co_t* co = NULL;
+
+  call_once(&co_init_flag, __co_init);
+
+  if (!u_stack_empty(loop.free)) {
+    co = u_stack_peek(loop.free);
+
+    u_stack_pop(loop.free);
+  } else {
+    co = u_zalloc(sizeof(co_t));
   }
 
-  co[co_len].id     = co_len;
-  co[co_len].status = S_INIT;
-  co[co_len].func   = func;
-  co[co_len].arg    = arg;
+  co->id     = loop.id++;
+  co->statue = CO_STATUS_SUSPEND;
+  co->func   = func;
+  co->arg    = arg;
 
-  co_len++;
+  infln("id = %zu, func = %p, arg = %p", co->id, co->func, co->arg);
+
+  u_queue_push(loop.ready, co);
 }
 
 void co_yield () {
-  if (!setjmp(co_cur->buf)) {
-    longjmp(co_main, (int)co_cur->id);
+  if (!setjmp(curr_co->ctx)) {
+    longjmp(co_main_ctx, (int)curr_co->id);
   }
 }
 
+void co_exit() {
+  longjmp(co_main_ctx, -1);
+}
+
 void co_loop() {
-  int flag = setjmp(co_main);
+  int flag = setjmp(co_main_ctx);
 
-  if (flag == -1) {
-    die("%zu finished", co_cur->id);
+  if (flag == -1) { /* free co */
+    infln("%zu finished", curr_co->id);
+    u_stack_push(loop.free, curr_co);
+    u_queue_pop(loop.ready);
   }
 
-  co_cur = NULL;
-  for (size_t i = 0; i < co_len; i++) {
-    if (co[i].status != S_END) {
-      die("idx is %zu\n", i);
-      co_cur = &co[i];
+  u_err_if(u_queue_empty(loop.ready), end);
 
-      break;
-    }
-  }
+  curr_co = u_queue_peek(loop.ready);
 
-  if (co_cur == NULL) {
-    return;
-  }
+  if (curr_co->statue == CO_STATUS_SUSPEND) {
+    infln("first run %zu", curr_co->id);
 
-  if (co_cur->status == S_INIT) {
-    co_cur->status = S_RUN;
-    void* stack    = (void*)(alignment16(((uintptr_t)co_cur->stack + STACK_SIZE - 16)));
+    curr_co->statue = CO_STATUS_RUNNING;
+    any_t stack     = (void*)align_of(as(curr_co->stack, uintptr_t) + CO_STACK_SIZE - 16, 16);
 
     asm volatile("movq %0, %%rsp;"
                  "movq %2, %%rdi;"
                  "pushq %3;"
                  "jmp *%1;"
                  :
-                 : "b"(stack), "d"(co_cur->func), "a"(co_cur->arg), "c"(co_exit)
+                 : "b"(stack), "d"(curr_co->func), "a"(curr_co->arg), "c"(co_exit)
                  : "memory");
   } else {
-    longjmp(co_cur->buf, 0);
+    infln("continue run %zu", curr_co->id);
+    longjmp(curr_co->ctx, 0);
   }
-}
 
-void co_exit() {
-  co_cur->status = S_END;
-  longjmp(co_main, -1);
+end:
+  while (!u_stack_empty(loop.free)) {
+    u_free(u_stack_peek(loop.free));
+    u_stack_pop(loop.free);
+  }
+
+  u_stack_cleanup(loop.free);
+  u_queue_cleanup(loop.ready);
 }
