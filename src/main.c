@@ -6,31 +6,32 @@
 #include <time.h>
 #include <unistd.h>
 
-int count = 0;
-
-void co_1(co_arg_t _arg) {
-  count++;
-  co_yield ();
-}
-
-void co_2(co_arg_t _arg) {
-  for (int i = 0; i < 100; i++) {
-    co_new(co_1, NULL);
-
+void co_switch(co_arg_t arg) {
+  for (ssize_t i = 0; i < 10000; i++) {
     co_yield ();
   }
+}
 
-  co_yield ();
+void co_create(co_arg_t arg) {
 }
 
 int main() {
-  for (int i = 0; i < 100; i++) {
-    co_new(co_2, NULL);
+
+#if 0
+
+  for (ssize_t i = 0; i < 100; i++) {
+    co_new(co_create, NULL);
   }
 
-  co_loop();
+#else
 
-  printf("%d", count);
+  for (ssize_t i = 0; i < 100; i++) {
+    co_new(co_switch, NULL);
+  }
+
+#endif
+
+  co_loop();
 
   return 0;
 }
