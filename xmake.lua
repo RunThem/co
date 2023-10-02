@@ -17,7 +17,8 @@ add_defines('_GNU_SOURCE=1')
 set_warnings('all', 'error')
 
 --- Language standard
-set_languages('gnu11')
+-- set_languages('gnu2x')
+add_cflags('-std=gnu2x')
 
 --- Unused variables and functions
 add_cflags('-Wno-unused-function', '-Wno-unused-variable', '-Wno-unused-but-set-variable')

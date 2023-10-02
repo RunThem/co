@@ -27,15 +27,15 @@ typedef struct {
 
 typedef struct {
   size_t id;
+  jmp_buf main_ctx;
+  co_t* curr_co;
 
   u_queue_t(co_t*) ready;
   u_stack_t(co_t*) free;
 } co_loop_t;
 
-static co_loop_t loop      = {0};
-static jmp_buf co_main_ctx = {0};  /* scheduling stack */
-static co_t* curr_co       = NULL; /* runtime stack frame */
-once_flag co_init_flag     = ONCE_FLAG_INIT;
+static co_loop_t loop  = {0};
+once_flag co_init_flag = ONCE_FLAG_INIT;
 
 static void __co_init() {
   loop.ready = u_queue_new(co_t*, CO_NUMS);
@@ -66,44 +66,44 @@ void co_new(co_func_t func, co_arg_t arg) {
 }
 
 void co_yield () {
-  if (!setjmp(curr_co->ctx)) {
-    longjmp(co_main_ctx, (int)curr_co->id);
+  if (!setjmp(loop.curr_co->ctx)) {
+    longjmp(loop.main_ctx, (int)loop.curr_co->id);
   }
 }
 
 void co_exit() {
-  longjmp(co_main_ctx, -1);
+  longjmp(loop.main_ctx, -1);
 }
 
 void co_loop() {
-  int flag = setjmp(co_main_ctx);
+  int flag = setjmp(loop.main_ctx);
 
   if (flag == -1) { /* free co */
-    infln("%zu finished", curr_co->id);
-    u_stack_push(loop.free, curr_co);
+    infln("%zu finished", loop.curr_co->id);
+    u_stack_push(loop.free, loop.curr_co);
     u_queue_pop(loop.ready);
   }
 
   u_err_if(u_queue_empty(loop.ready), end);
 
-  curr_co = u_queue_peek(loop.ready);
+  loop.curr_co = u_queue_peek(loop.ready);
 
-  if (curr_co->statue == CO_STATUS_SUSPEND) {
-    infln("first run %zu", curr_co->id);
+  if (loop.curr_co->statue == CO_STATUS_SUSPEND) {
+    infln("first run %zu", loop.curr_co->id);
 
-    curr_co->statue = CO_STATUS_RUNNING;
-    any_t stack     = (void*)align_of(as(curr_co->stack, uintptr_t) + CO_STACK_SIZE - 16, 16);
+    loop.curr_co->statue = CO_STATUS_RUNNING;
+    any_t stack = any(align_of(as(loop.curr_co->stack, uintptr_t) + CO_STACK_SIZE - 16, 16));
 
     asm volatile("movq %0, %%rsp;"
                  "movq %2, %%rdi;"
                  "pushq %3;"
                  "jmp *%1;"
                  :
-                 : "b"(stack), "d"(curr_co->func), "a"(curr_co->arg), "c"(co_exit)
+                 : "b"(stack), "d"(loop.curr_co->func), "a"(loop.curr_co->arg), "c"(co_exit)
                  : "memory");
   } else {
-    infln("continue run %zu", curr_co->id);
-    longjmp(curr_co->ctx, 0);
+    infln("continue run %zu", loop.curr_co->id);
+    longjmp(loop.curr_co->ctx, 0);
   }
 
 end:
