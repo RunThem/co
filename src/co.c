@@ -1,29 +1,39 @@
 #include "co.h"
 
-#include <mimalloc.h>
 #include <setjmp.h>
-#include <string.h>
+#include <stdint.h>
 #include <sys/queue.h>
 
-/* libs */
+#ifdef CO_USE_MIMALLOC
+#  include <mimalloc.h>
+#  define co_alloc(size) mi_malloc(size)
+#  define co_free(ptr)   mi_free(ptr)
+#else /* !CO_USE_MIMALLOC */
+#  include <stdlib.h>
+#  define co_alloc(size) malloc(size)
+#  define co_free(ptr)   free(ptr)
+#endif /* !CO_USE_MIMALLOC */
 
 #ifdef NDEBUG
 #  define infln(fmt, ...)
-#else
+#else /* !NDEBUG */
 #  include <stdio.h>
 
 #  define infln(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__);
-#endif
+#endif /* !NDEBUG */
+
+#define CO_ARGS_NUM 3 /* rdi, rsi, rdx */
 
 typedef uint64_t reg_t;
+
 typedef struct co_t {
-  size_t id;
+  size_t id; /* 线程 id */
 
-  void* func;
-  reg_t args[4];
+  void* func;              /* 线程执行入口 */
+  reg_t args[CO_ARGS_NUM]; /* 线程参数 */
 
-  jmp_buf ctx;
-  uint8_t* stack;
+  jmp_buf ctx;    /* 上下文 */
+  uint8_t* stack; /* 栈帧 */
 
   STAILQ_ENTRY(co_t) next;
 } co_t;
@@ -31,26 +41,21 @@ typedef struct co_t {
 typedef STAILQ_HEAD(co_list_t, co_t) co_list_t, *co_list_ref_t;
 
 typedef struct {
-  size_t id;
+  size_t id;               /* 线程 id 分配器 */
+  reg_t regs[CO_ARGS_NUM]; /* 参数缓存 */
 
-  jmp_buf ctx;
-  co_t* run;
-
-  reg_t regs[3];
-
-  co_list_t ready;
-  co_list_t dead;
+  co_t* run;       /* 当前运行的线程 */
+  co_list_t ready; /* 就绪队列 */
+  co_list_t dead;  /* 死亡队列 */
 } co_loop_t;
+
+static jmp_buf ctx;
 
 static co_loop_t loop = {
     .id    = 1,
     .ready = {.stqh_first = NULL, .stqh_last = &loop.ready.stqh_first},
     .dead  = {.stqh_first = NULL, .stqh_last = &loop.dead.stqh_first },
 };
-
-void co_exit() {
-  longjmp(loop.ctx, -1);
-}
 
 /*
  * @param stack         the stack               (rdi)
@@ -59,14 +64,27 @@ void co_exit() {
  * @param rsi           the func args           (rcx)
  * @param rdx           the func args           (r8)
  * */
-int __switch(void* stack, void* func, reg_t rdi, reg_t rsi, reg_t rdx);
+int __co_switch(void* stack, void* func, reg_t rdi, reg_t rsi, reg_t rdx);
 
 asm(".text                                               \n"
     ".align 8                                            \n"
-    ".globl  __switch                                    \n"
-    ".type   __switch %function                          \n"
-    ".hidden __switch                                    \n"
-    "__switch:                                           \n"
+    ".globl  __co_exit                                   \n"
+    ".type   __co_exit %function                         \n"
+    ".hidden __co_exit                                   \n"
+    "__co_exit:                                          \n"
+    "     lea ctx(%rip), %rdi                            \n"
+    "     mov $0xffffffff, %esi                          \n"
+    "                                                    \n"
+    "     call longjmp@plt                               \n"
+    "                                                    \n"
+    "                                                    \n"
+    "                                                    \n"
+    ".text                                               \n"
+    ".align 8                                            \n"
+    ".globl  __co_switch                                 \n"
+    ".type   __co_switch %function                       \n"
+    ".hidden __co_switch                                 \n"
+    "__co_switch:                                        \n"
     "     # 16-align for the stack top address           \n"
     "     movabs $-16, %rax                              \n"
     "     andq %rax, %rdi                                \n"
@@ -75,7 +93,7 @@ asm(".text                                               \n"
     "     movq %rdi, %rsp                                \n"
     "                                                    \n"
     "     # save exit function                           \n"
-    "     leaq co_exit(%rip), %rax                       \n"
+    "     leaq __co_exit(%rip), %rax                     \n"
     "     pushq %rax                                     \n"
     "                                                    \n"
     "     # save entry function args                     \n"
@@ -101,7 +119,7 @@ void co_new(void* func, ...) {
     co = STAILQ_FIRST(&loop.dead);
     STAILQ_REMOVE_HEAD(&loop.dead, next);
   } else {
-    co = mi_calloc(CO_STACK_SIZE, 1);
+    co = co_alloc(CO_STACK_SIZE);
   }
 
   co->id      = loop.id++;
@@ -116,13 +134,13 @@ void co_new(void* func, ...) {
 
 void co_yield () {
   if (!setjmp(loop.run->ctx)) {
-    longjmp(loop.ctx, (int)loop.run->id);
+    longjmp(ctx, (int)loop.run->id);
   }
 }
 
 void co_loop() {
   co_t* co = NULL;
-  int flag = setjmp(loop.ctx);
+  int flag = setjmp(ctx);
 
   if (flag == -1) { /* free co */
     infln("%zu finished", loop.run->id);
@@ -141,11 +159,11 @@ void co_loop() {
     infln("first run %zu", loop.run->id);
 
     loop.run->stack = (void*)loop.run + CO_STACK_SIZE - 16;
-    __switch(loop.run->stack,
-             loop.run->func,
-             loop.run->args[0],
-             loop.run->args[1],
-             loop.run->args[2]);
+    __co_switch(loop.run->stack,
+                loop.run->func,
+                loop.run->args[0],
+                loop.run->args[1],
+                loop.run->args[2]);
   } else {
     infln("continue run %zu", loop.run->id);
 
@@ -157,11 +175,11 @@ void co_loop() {
 end:
   while ((co = STAILQ_FIRST(&loop.ready))) {
     STAILQ_REMOVE_HEAD(&loop.ready, next);
-    mi_free(co);
+    co_free(co);
   }
 
   while ((co = STAILQ_FIRST(&loop.dead))) {
     STAILQ_REMOVE_HEAD(&loop.dead, next);
-    mi_free(co);
+    co_free(co);
   }
 }

@@ -5,12 +5,8 @@ extern "C" {
 #endif
 
 #ifndef CO_STACK_SIZE
-#  define CO_STACK_SIZE (8192) /* 8 K */
-#endif
-
-#ifndef CO_NUMS
-#  define CO_NUMS 256
-#endif
+#  define CO_STACK_SIZE (8192)
+#endif /* !CO_STACK_SIZE */
 
 extern void co_new(void* func, ...);
 extern void co_yield ();
