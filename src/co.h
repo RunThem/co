@@ -12,10 +12,7 @@ extern "C" {
 #  define CO_NUMS 256
 #endif
 
-typedef void* co_args_t;
-typedef void (*co_func_t)(co_args_t);
-
-extern void co_new(co_func_t func, co_args_t arg);
+extern void co_new(void* func, ...);
 extern void co_yield ();
 extern void co_loop();
 
