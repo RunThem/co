@@ -1,117 +1,145 @@
 #include "co.h"
 
+#include <mimalloc.h>
 #include <setjmp.h>
-#include <threads.h>
+#include <sys/queue.h>
 
 /* libs */
-#include <u/core/queue.h>
-#include <u/core/stack.h>
-#include <u/u.h>
 
-typedef enum {
-  CO_STATUS_SUSPEND,
-  CO_STATUS_RUNNING,
-  CO_STATUS_DEAD,
-} co_status_e;
+#ifdef NDEBUG
+#  define infln(fmt, ...)
+#else
+#  include <stdio.h>
 
-typedef struct {
+#  define infln(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__);
+#endif
+
+typedef struct co_t {
   size_t id;
-  co_status_e statue;
 
   co_func_t func;
-  co_arg_t arg;
+  co_args_t arg;
 
   jmp_buf ctx;
-  uint8_t stack[CO_STACK_SIZE];
+  uint8_t* stack;
+
+  STAILQ_ENTRY(co_t) next;
 } co_t;
+
+typedef STAILQ_HEAD(co_list_t, co_t) co_list_t, *co_list_ref_t;
 
 typedef struct {
   size_t id;
   jmp_buf main_ctx;
-  co_t* curr_co;
+  co_t* run;
 
-  u_queue_t(co_t*) ready;
-  u_stack_t(co_t*) free;
+  co_list_t ready;
+  co_list_t dead;
 } co_loop_t;
 
-static co_loop_t loop  = {0};
-once_flag co_init_flag = ONCE_FLAG_INIT;
+static co_loop_t loop = {
+    .id    = 1,
+    .ready = {.stqh_first = NULL, .stqh_last = &loop.ready.stqh_first},
+    .dead  = {.stqh_first = NULL, .stqh_last = &loop.dead.stqh_first },
+};
 
-static void __co_init() {
-  loop.ready = u_queue_new(co_t*, CO_NUMS);
-  loop.free  = u_stack_new(co_t*, CO_NUMS);
-}
-
-void co_new(co_func_t func, co_arg_t arg) {
-  co_t* co = NULL;
-
-  call_once(&co_init_flag, __co_init);
-
-  if (!u_stack_empty(loop.free)) {
-    co = u_stack_peek(loop.free);
-
-    u_stack_pop(loop.free);
-  } else {
-    co = u_zalloc(sizeof(co_t));
-  }
-
-  co->id     = loop.id++;
-  co->statue = CO_STATUS_SUSPEND;
-  co->func   = func;
-  co->arg    = arg;
-
-  infln("id = %zu, func = %p, arg = %p", co->id, co->func, co->arg);
-
-  u_queue_push(loop.ready, co);
-}
-
-void co_yield () {
-  if (!setjmp(loop.curr_co->ctx)) {
-    longjmp(loop.main_ctx, (int)loop.curr_co->id);
-  }
-}
-
-void co_exit() {
+static void co_exit() {
   longjmp(loop.main_ctx, -1);
 }
 
+/*
+ * @param stack         the stack               (rdi)
+ * @param exit          the exit function       (rsi)
+ * @param func          the entry function      (rdx)
+ * @param arg           the entry function args (rcx)
+ * */
+int __switch(void* stack, void (*exit)(), co_func_t func, co_args_t arg);
+
+asm(".text                                               \n"
+    ".align 8                                            \n"
+    ".globl  __switch                                    \n"
+    ".type   __switch %function                          \n"
+    ".hidden __switch                                    \n"
+    "__switch:                                           \n"
+    "     # 16-align for the stack top address           \n"
+    "     movabs $-16, %r8                               \n"
+    "     andq %r8, %rdi                                 \n"
+    "                                                    \n"
+    "     # switch to the new stack                      \n"
+    "     movq %rdi, %rsp                                \n"
+    "                                                    \n"
+    "     # save exit function                           \n"
+    "     pushq %rsi                                     \n"
+    "                                                    \n"
+    "     # save entry function args                     \n"
+    "     movq %rcx, %rdi                                \n"
+    "                                                    \n"
+    "     # jum entry function                           \n"
+    "     jmp *%rdx                                      \n");
+
+void co_new(co_func_t func, co_args_t args) {
+  co_t* co = NULL;
+
+  if (!STAILQ_EMPTY(&loop.dead)) {
+    co = STAILQ_FIRST(&loop.dead);
+    STAILQ_REMOVE_HEAD(&loop.dead, next);
+  } else {
+    co = mi_calloc(CO_STACK_SIZE, 1);
+  }
+
+  co->id    = loop.id++;
+  co->func  = func;
+  co->arg   = args;
+  co->stack = NULL;
+
+  infln("id = %zu, func = %p, arg = %p", co->id, co->func, co->arg);
+
+  STAILQ_INSERT_TAIL(&loop.ready, co, next);
+}
+
+void co_yield () {
+  if (!setjmp(loop.run->ctx)) {
+    longjmp(loop.main_ctx, (int)loop.run->id);
+  }
+}
+
 void co_loop() {
+  co_t* co = NULL;
   int flag = setjmp(loop.main_ctx);
 
   if (flag == -1) { /* free co */
-    infln("%zu finished", loop.curr_co->id);
-    u_stack_push(loop.free, loop.curr_co);
-    u_queue_pop(loop.ready);
+    infln("%zu finished", loop.run->id);
+
+    STAILQ_REMOVE_HEAD(&loop.ready, next);
+    STAILQ_INSERT_HEAD(&loop.dead, loop.run, next);
   }
 
-  u_err_if(u_queue_empty(loop.ready), end);
+  if (STAILQ_EMPTY(&loop.ready)) {
+    goto end;
+  }
 
-  loop.curr_co = u_queue_peek(loop.ready);
+  loop.run = STAILQ_FIRST(&loop.ready);
 
-  if (loop.curr_co->statue == CO_STATUS_SUSPEND) {
-    infln("first run %zu", loop.curr_co->id);
+  if (!loop.run->stack) {
+    infln("first run %zu", loop.run->id);
 
-    loop.curr_co->statue = CO_STATUS_RUNNING;
-    any_t stack = any(align_of(as(loop.curr_co->stack, uintptr_t) + CO_STACK_SIZE - 16, 16));
-
-    asm volatile("movq %0, %%rsp;"
-                 "movq %2, %%rdi;"
-                 "pushq %3;"
-                 "jmp *%1;"
-                 :
-                 : "b"(stack), "d"(loop.curr_co->func), "a"(loop.curr_co->arg), "c"(co_exit)
-                 : "memory");
+    loop.run->stack = (void*)loop.run + CO_STACK_SIZE - 16;
+    __switch(loop.run->stack, co_exit, loop.run->func, loop.run->arg);
   } else {
-    infln("continue run %zu", loop.curr_co->id);
-    longjmp(loop.curr_co->ctx, 0);
+    infln("continue run %zu", loop.run->id);
+    longjmp(loop.run->ctx, 0);
   }
+
+  infln("end");
 
 end:
-  while (!u_stack_empty(loop.free)) {
-    u_free(u_stack_peek(loop.free));
-    u_stack_pop(loop.free);
+  while ((co = STAILQ_FIRST(&loop.ready))) {
+    STAILQ_REMOVE_HEAD(&loop.ready, next);
+    mi_free(co);
   }
 
-  u_stack_cleanup(loop.free);
-  u_queue_cleanup(loop.ready);
+  while ((co = STAILQ_FIRST(&loop.dead))) {
+    STAILQ_REMOVE_HEAD(&loop.dead, next);
+    mi_free(co);
+  }
 }
