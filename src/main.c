@@ -1,41 +1,58 @@
 #include "co.h"
 
+#include <libsock.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 
-struct st {
-  int a;
-  int b;
-};
+#define inf(fmt, ...) fprintf(stderr, fmt "\n" __VA_OPT__(, ) __VA_ARGS__)
 
-void co_fun1(int a, struct st b, char* c) {
-  printf("args[0] is %d\n", a);
-  printf("args[1].a is %d\n", b.a);
-  printf("args[1].b is %d\n", b.b);
-  printf("args[3] is '%s'\n", c);
+void echo(int fd) {
+  char buf[1024] = {};
+  ssize_t size   = {};
+
+  while (true) {
+    size = co_recv(fd, buf, sizeof(buf), 0);
+    if (size == 0) {
+      close(fd);
+      break;
+    }
+
+    co_send(fd, buf, size, 0);
+  }
 }
 
-size_t cnt = 0;
-void co_fun2() {
-  for (int i = 0; i < 100; i++) {
-    co_yield ();
-    cnt++;
+void _main() {
+  int cfd                 = {};
+  struct sockaddr_in addr = {};
+  socklen_t addr_len      = {};
+  sock_conf_t conf        = {
+             .type     = SOCK_TYPE_INET4_TCP,
+             .host     = "localhost",
+             .port     = 8080,
+             .nonblock = true,
+             .listen   = 5,
+  };
+
+  sock_open(&conf);
+  inf("listen %s:%d, fd is %d", conf.host, conf.port, conf.fd);
+
+  while (true) {
+    cfd = co_accept(conf.fd, (struct sockaddr*)&addr, &addr_len);
+    inf("client is %d", cfd);
+
+    co_new(echo, cfd);
   }
+
+  close(conf.fd);
 }
 
 int main() {
-  struct st s = {.a = 1234567, .b = 7654321};
+  co_init();
 
-  co_new(co_fun1, 12, s, "sdifj");
-
-  for (int i = 0; i < 100; i++) {
-    co_new(co_fun2);
-  }
+  co_new(_main);
 
   co_loop();
-
-  printf("cnt is %lu\n", cnt);
 
   return 0;
 }
