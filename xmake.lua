@@ -1,10 +1,10 @@
---- Project name
+--- Project
 set_project('co')
 
---- Project version
+--- Version
 set_version('0.0.1')
 
---- xmake configure
+--- Xmake configure
 set_xmakever('2.6.1')
 
 --- Build mode
@@ -13,35 +13,43 @@ add_rules('mode.debug', 'mode.valgrind', 'mode.release')
 --- Macro definition
 add_defines('_GNU_SOURCE=1')
 
---- No warning
+--- No warning, no error
 set_warnings('all', 'error')
 
 --- Language standard
--- set_languages('gnu2x')
-add_cflags('-std=gnu2x')
+set_languages('clatest', 'cxxlatest')
 
 --- Unused variables and functions
-add_cflags('-Wno-unused-function', '-Wno-unused-variable', '-Wno-unused-but-set-variable')
+add_cflags(
+  '-Wno-unused-label',
+  '-Wno-unused-function',
+  '-Wno-unused-variable',
+  '-Wno-unused-but-set-variable',
+  '-Wno-address-of-packed-member'
+)
 
---- DWARF v4
-add_cflags('-gdwarf-4')
+--- Use reserved identifier
+add_cflags('-Wno-reserved-macro-identifier', '-Wno-reserved-identifier')
+
+--- Disable VLA extensons
+add_cflags('-Werror=vla')
 
 --- Toolchain
-add_toolchains('clang')
+set_toolchains('gcc')
 
 --- Task(lsp) generate the project file
 task('lsp', function()
   set_category('plugin')
 
-  on_run(function()
-    os.exec('xmake project -k cmake build/lsp')
-    os.exec('xmake project -k compile_commands build/lsp')
-  end)
-
   set_menu({
     usage = 'xmake lsp',
     description = 'Generate the project file.',
   })
+
+  on_run(function()
+    os.exec('xmake project -k cmake build/lsp')
+    os.exec('xmake project -k compile_commands build/lsp')
+  end)
 end)
 
 --- Lambda expressions
@@ -56,11 +64,11 @@ end
 
 --- Private repositories
 add_repositories('RunThem https://github.com/RunThem/My-xmake-repo')
-add_requires('libu')
-add_requires('mimalloc')
 
 --- Project common header file path
 add_includedirs('$(projectdir)/src')
+
+--- Third party library
 
 --- main target
 target('co', function()
