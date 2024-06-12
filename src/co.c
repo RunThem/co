@@ -2,7 +2,10 @@
 
 #include <setjmp.h>
 #include <stdint.h>
+#include <strings.h>
 #include <sys/queue.h>
+#include <threads.h>
+#include <unistd.h>
 
 #ifdef CO_USE_MIMALLOC
 #  include <mimalloc.h>
@@ -14,48 +17,63 @@
 #  define co_free(ptr)   free(ptr)
 #endif /* !CO_USE_MIMALLOC */
 
+#undef NDEBUG
 #ifdef NDEBUG
-#  define infln(fmt, ...)
+#  define inf(fmt, ...)
 #else /* !NDEBUG */
 #  include <stdio.h>
 
-#  define infln(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__);
+#  define inf(fmt, ...) fprintf(stderr, fmt "\n" __VA_OPT__(, ) __VA_ARGS__);
 #endif /* !NDEBUG */
 
 #define CO_ARGS_NUM 3 /* rdi, rsi, rdx */
 
+#define CO_INVALID_FD -1
+
+/*
+ * Typedef
+ * */
 typedef uint64_t reg_t;
 
 typedef struct co_t {
-  size_t id; /* 线程 id */
+  size_t id; /* 协程 id */
 
-  void* func;              /* 线程执行入口 */
-  reg_t args[CO_ARGS_NUM]; /* 线程参数 */
+  void* func;              /* 协程执行入口 */
+  reg_t args[CO_ARGS_NUM]; /* 协程参数 */
 
   jmp_buf ctx;    /* 上下文 */
   uint8_t* stack; /* 栈帧 */
 
-  STAILQ_ENTRY(co_t) next;
+  int fd; /* 监听的描述符 */
+
+  TAILQ_ENTRY(co_t) next;
 } co_t;
 
-typedef STAILQ_HEAD(co_list_t, co_t) co_list_t, *co_list_ref_t;
+typedef TAILQ_HEAD(co_list_t, co_t) co_list_t, *co_list_ref_t;
 
 typedef struct {
-  size_t id;               /* 线程 id 分配器 */
+  size_t id;               /* 协程 id 分配器 */
   reg_t regs[CO_ARGS_NUM]; /* 参数缓存 */
 
-  co_t* run;       /* 当前运行的线程 */
+  co_t* run;       /* 当前运行的协程 */
   co_list_t ready; /* 就绪队列 */
+  co_list_t wait;  /* 等待队列 */
   co_list_t dead;  /* 死亡队列 */
+
+  mtx_t mtx; /* 全局大锁 */
+
+  thrd_t fd_thrd; /* 描述符调度器线程 */
+  int maxfd;      /* 最大的描述符 */
+  fd_set rfds;
+  fd_set wfds;
 } co_loop_t;
 
-static jmp_buf ctx;
+static jmp_buf ctx    = {};
+static co_loop_t loop = {};
 
-static co_loop_t loop = {
-    .id    = 1,
-    .ready = {.stqh_first = NULL, .stqh_last = &loop.ready.stqh_first},
-    .dead  = {.stqh_first = NULL, .stqh_last = &loop.dead.stqh_first },
-};
+/*
+ * Context switch
+ * */
 
 /*
  * @param stack         the stack               (rdi)
@@ -104,6 +122,134 @@ __asm__(".text                                               \n"
         "     # jum entry function                           \n"
         "     jmp *%rax                                      \n");
 
+/*
+ * Fd scheduler
+ * */
+static int co_fd_scheduler(void* args) {
+  int cnt                = {};
+  int i                  = {};
+  co_t* co               = {};
+  fd_set rfds            = {};
+  fd_set wfds            = {};
+  struct timeval timeout = {.tv_sec = 1};
+
+  FD_ZERO(&rfds);
+  FD_ZERO(&wfds);
+
+  while (true) {
+    rfds = loop.rfds;
+    wfds = loop.wfds;
+
+    cnt = select(loop.maxfd + 1, &rfds, &wfds, nullptr, &timeout);
+    if (cnt == 0) {
+      continue;
+    }
+
+    for (i = 0; i < loop.maxfd; i++) {
+      TAILQ_FOREACH(co, &loop.wait, next) {
+        if (co->fd == CO_INVALID_FD) {
+          continue;
+        }
+
+        if (FD_ISSET(co->fd, &rfds)) {
+          inf("select rfds is %d", co->fd);
+          TAILQ_REMOVE(&loop.wait, co, next);
+          TAILQ_INSERT_TAIL(&loop.ready, co, next);
+        }
+
+        if (FD_ISSET(co->fd, &wfds)) {
+          inf("select wfds is %d", co->fd);
+          TAILQ_REMOVE(&loop.wait, co, next);
+          TAILQ_INSERT_TAIL(&loop.ready, co, next);
+        }
+      }
+    }
+  }
+
+  return 0;
+}
+
+int co_accept(int fd, __SOCKADDR_ARG addr, socklen_t* restrict addr_len) {
+  TAILQ_REMOVE(&loop.ready, loop.run, next);
+  TAILQ_INSERT_TAIL(&loop.wait, loop.run, next);
+
+  inf("accept fd %d", fd);
+
+  mtx_lock(&loop.mtx);
+  FD_SET(fd, &loop.rfds);
+  loop.maxfd   = (fd > loop.maxfd) ? fd : loop.maxfd;
+  loop.run->fd = fd;
+  mtx_unlock(&loop.mtx);
+
+  co_yield ();
+
+  mtx_lock(&loop.mtx);
+  FD_CLR(fd, &loop.rfds);
+  loop.run->fd = CO_INVALID_FD;
+  mtx_unlock(&loop.mtx);
+
+  return accept(fd, addr, addr_len);
+}
+
+ssize_t co_recv(int fd, void* buf, size_t n, int flags) {
+  TAILQ_REMOVE(&loop.ready, loop.run, next);
+  TAILQ_INSERT_TAIL(&loop.wait, loop.run, next);
+
+  inf("recv fd %d", fd);
+
+  mtx_lock(&loop.mtx);
+  FD_SET(fd, &loop.rfds);
+  loop.maxfd   = (fd > loop.maxfd) ? fd : loop.maxfd;
+  loop.run->fd = fd;
+  mtx_unlock(&loop.mtx);
+
+  co_yield ();
+
+  mtx_lock(&loop.mtx);
+  FD_CLR(fd, &loop.rfds);
+  loop.run->fd = CO_INVALID_FD;
+  mtx_unlock(&loop.mtx);
+
+  return recv(fd, buf, n, flags);
+}
+
+ssize_t co_send(int fd, const void* buf, size_t n, int flags) {
+  TAILQ_REMOVE(&loop.ready, loop.run, next);
+  TAILQ_INSERT_TAIL(&loop.wait, loop.run, next);
+
+  inf("send fd %d", fd);
+
+  mtx_lock(&loop.mtx);
+  FD_SET(fd, &loop.wfds);
+  loop.maxfd   = (fd > loop.maxfd) ? fd : loop.maxfd;
+  loop.run->fd = fd;
+  mtx_unlock(&loop.mtx);
+
+  co_yield ();
+
+  mtx_lock(&loop.mtx);
+  FD_CLR(fd, &loop.wfds);
+  loop.run->fd = CO_INVALID_FD;
+  mtx_unlock(&loop.mtx);
+
+  return send(fd, buf, n, flags);
+}
+
+/*
+ * Core
+ * */
+void co_init() {
+  loop.id = 1;
+
+  TAILQ_INIT(&loop.ready);
+  TAILQ_INIT(&loop.wait);
+  TAILQ_INIT(&loop.dead);
+
+  thrd_create(&loop.fd_thrd, co_fd_scheduler, nullptr);
+
+  mtx_init(&loop.mtx, mtx_plain);
+}
+
 void co_new(void* func, ...) {
   co_t* co = NULL;
 
@@ -114,9 +260,9 @@ void co_new(void* func, ...) {
                    :
                    : "rsi", "rdx", "rcx");
 
-  if (!STAILQ_EMPTY(&loop.dead)) {
-    co = STAILQ_FIRST(&loop.dead);
-    STAILQ_REMOVE_HEAD(&loop.dead, next);
+  if (!TAILQ_EMPTY(&loop.dead)) {
+    co = TAILQ_FIRST(&loop.dead);
+    TAILQ_REMOVE(&loop.dead, co, next);
   } else {
     co = co_alloc(CO_STACK_SIZE);
   }
@@ -128,7 +274,7 @@ void co_new(void* func, ...) {
   co->args[1] = loop.regs[1];
   co->args[2] = loop.regs[2];
 
-  STAILQ_INSERT_TAIL(&loop.ready, co, next);
+  TAILQ_INSERT_TAIL(&loop.ready, co, next);
 }
 
 void co_yield () {
@@ -142,18 +288,19 @@ void co_loop() {
   int flag = setjmp(ctx);
 
   if (flag == -1) { /* free co */
-    STAILQ_REMOVE_HEAD(&loop.ready, next);
-    STAILQ_INSERT_HEAD(&loop.dead, loop.run, next);
-  } else if (flag != 0) {
-    STAILQ_REMOVE_HEAD(&loop.ready, next);
-    STAILQ_INSERT_TAIL(&loop.ready, loop.run, next);
+    TAILQ_REMOVE(&loop.ready, loop.run, next);
+    TAILQ_INSERT_HEAD(&loop.dead, loop.run, next);
   }
 
-  if (STAILQ_EMPTY(&loop.ready)) {
+  if (TAILQ_EMPTY(&loop.ready) && TAILQ_EMPTY(&loop.wait)) {
     goto end;
   }
 
-  loop.run = STAILQ_FIRST(&loop.ready);
+  do {
+    loop.run = TAILQ_FIRST(&loop.ready);
+
+    // sleep(1);
+  } while (loop.run == nullptr);
 
   if (!loop.run->stack) {
     loop.run->stack = (void*)loop.run + CO_STACK_SIZE - 16;
@@ -166,16 +313,11 @@ void co_loop() {
     longjmp(loop.run->ctx, 0);
   }
 
-  infln("end");
+  inf("end");
 
 end:
-  while ((co = STAILQ_FIRST(&loop.ready))) {
-    STAILQ_REMOVE_HEAD(&loop.ready, next);
-    co_free(co);
-  }
-
-  while ((co = STAILQ_FIRST(&loop.dead))) {
-    STAILQ_REMOVE_HEAD(&loop.dead, next);
+  while ((co = TAILQ_FIRST(&loop.dead))) {
+    TAILQ_REMOVE(&loop.dead, co, next);
     co_free(co);
   }
 }
