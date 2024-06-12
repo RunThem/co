@@ -67,8 +67,6 @@ target('co', function()
   set_kind('static')
   add_files('src/co.c')
   add_headerfiles('src/co.h')
-
-  add_packages('mimalloc')
 end)
 
 target('demo', function()
@@ -76,6 +74,4 @@ target('demo', function()
   add_files('src/main.c')
 
   add_deps('co')
-
-  add_packages('libu')
 end)
