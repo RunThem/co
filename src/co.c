@@ -75,8 +75,7 @@ asm(".text                                               \n"
     "     lea ctx(%rip), %rdi                            \n"
     "     mov $0xffffffff, %esi                          \n"
     "                                                    \n"
-    "     call longjmp@plt                               \n"
-    "                                                    \n"
+    "     call longjmp                                   \n"
     "                                                    \n"
     "                                                    \n"
     ".text                                               \n"
@@ -143,10 +142,11 @@ void co_loop() {
   int flag = setjmp(ctx);
 
   if (flag == -1) { /* free co */
-    infln("%zu finished", loop.run->id);
-
     STAILQ_REMOVE_HEAD(&loop.ready, next);
     STAILQ_INSERT_HEAD(&loop.dead, loop.run, next);
+  } else if (flag != 0) {
+    STAILQ_REMOVE_HEAD(&loop.ready, next);
+    STAILQ_INSERT_TAIL(&loop.ready, loop.run, next);
   }
 
   if (STAILQ_EMPTY(&loop.ready)) {
@@ -156,8 +156,6 @@ void co_loop() {
   loop.run = STAILQ_FIRST(&loop.ready);
 
   if (!loop.run->stack) {
-    infln("first run %zu", loop.run->id);
-
     loop.run->stack = (void*)loop.run + CO_STACK_SIZE - 16;
     __co_switch(loop.run->stack,
                 loop.run->func,
@@ -165,8 +163,6 @@ void co_loop() {
                 loop.run->args[1],
                 loop.run->args[2]);
   } else {
-    infln("continue run %zu", loop.run->id);
-
     longjmp(loop.run->ctx, 0);
   }
 
