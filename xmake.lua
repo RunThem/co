@@ -47,8 +47,8 @@ task('lsp', function()
   })
 
   on_run(function()
-    os.exec('xmake project -k cmake build/lsp')
-    os.exec('xmake project -k compile_commands build/lsp')
+    os.exec('xmake project -k cmake build')
+    os.exec('xmake project -k compile_commands build')
   end)
 end)
 
@@ -69,12 +69,15 @@ add_repositories('RunThem https://github.com/RunThem/My-xmake-repo')
 add_includedirs('$(projectdir)/src')
 
 --- Third party library
+add_requires('libsock')
 
 --- main target
 target('co', function()
   set_kind('static')
   add_files('src/co.c')
   add_headerfiles('src/co.h')
+
+  add_packages('libsock')
 end)
 
 target('demo', function()
@@ -82,4 +85,6 @@ target('demo', function()
   add_files('src/main.c')
 
   add_deps('co')
+
+  add_packages('libsock')
 end)
