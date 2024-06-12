@@ -66,53 +66,53 @@ static co_loop_t loop = {
  * */
 int __co_switch(void* stack, void* func, reg_t rdi, reg_t rsi, reg_t rdx);
 
-asm(".text                                               \n"
-    ".align 8                                            \n"
-    ".globl  __co_exit                                   \n"
-    ".type   __co_exit %function                         \n"
-    ".hidden __co_exit                                   \n"
-    "__co_exit:                                          \n"
-    "     lea ctx(%rip), %rdi                            \n"
-    "     mov $0xffffffff, %esi                          \n"
-    "                                                    \n"
-    "     call longjmp                                   \n"
-    "                                                    \n"
-    "                                                    \n"
-    ".text                                               \n"
-    ".align 8                                            \n"
-    ".globl  __co_switch                                 \n"
-    ".type   __co_switch %function                       \n"
-    ".hidden __co_switch                                 \n"
-    "__co_switch:                                        \n"
-    "     # 16-align for the stack top address           \n"
-    "     movabs $-16, %rax                              \n"
-    "     andq %rax, %rdi                                \n"
-    "                                                    \n"
-    "     # switch to the new stack                      \n"
-    "     movq %rdi, %rsp                                \n"
-    "                                                    \n"
-    "     # save exit function                           \n"
-    "     leaq __co_exit(%rip), %rax                     \n"
-    "     pushq %rax                                     \n"
-    "                                                    \n"
-    "     # save entry function args                     \n"
-    "     movq %rsi, %rax                                \n"
-    "     movq %rdx, %rdi                                \n"
-    "     movq %rcx, %rsi                                \n"
-    "     movq %r8,  %rdx                                \n"
-    "                                                    \n"
-    "     # jum entry function                           \n"
-    "     jmp *%rax                                      \n");
+__asm__(".text                                               \n"
+        ".align 8                                            \n"
+        ".globl  __co_exit                                   \n"
+        ".type   __co_exit %function                         \n"
+        ".hidden __co_exit                                   \n"
+        "__co_exit:                                          \n"
+        "     lea ctx(%rip), %rdi                            \n"
+        "     mov $0xffffffff, %esi                          \n"
+        "                                                    \n"
+        "     call longjmp                                   \n"
+        "                                                    \n"
+        "                                                    \n"
+        ".text                                               \n"
+        ".align 8                                            \n"
+        ".globl  __co_switch                                 \n"
+        ".type   __co_switch %function                       \n"
+        ".hidden __co_switch                                 \n"
+        "__co_switch:                                        \n"
+        "     # 16-align for the stack top address           \n"
+        "     movabs $-16, %rax                              \n"
+        "     andq %rax, %rdi                                \n"
+        "                                                    \n"
+        "     # switch to the new stack                      \n"
+        "     movq %rdi, %rsp                                \n"
+        "                                                    \n"
+        "     # save exit function                           \n"
+        "     leaq __co_exit(%rip), %rax                     \n"
+        "     pushq %rax                                     \n"
+        "                                                    \n"
+        "     # save entry function args                     \n"
+        "     movq %rsi, %rax                                \n"
+        "     movq %rdx, %rdi                                \n"
+        "     movq %rcx, %rsi                                \n"
+        "     movq %r8,  %rdx                                \n"
+        "                                                    \n"
+        "     # jum entry function                           \n"
+        "     jmp *%rax                                      \n");
 
 void co_new(void* func, ...) {
   co_t* co = NULL;
 
-  asm volatile("movq %%rsi, %0\n\t"
-               "movq %%rdx, %1\n\t"
-               "movq %%rcx, %2\n\t"
-               : "=m"(loop.regs[0]), "=m"(loop.regs[1]), "=m"(loop.regs[2])
-               :
-               : "rsi", "rdx", "rcx");
+  __asm__ volatile("movq %%rsi, %0\n\t"
+                   "movq %%rdx, %1\n\t"
+                   "movq %%rcx, %2\n\t"
+                   : "=m"(loop.regs[0]), "=m"(loop.regs[1]), "=m"(loop.regs[2])
+                   :
+                   : "rsi", "rdx", "rcx");
 
   if (!STAILQ_EMPTY(&loop.dead)) {
     co = STAILQ_FIRST(&loop.dead);
