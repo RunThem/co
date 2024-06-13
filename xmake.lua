@@ -75,7 +75,7 @@ add_requires('libsock')
 target('co', function()
   set_kind('static')
   add_files('src/co.c')
-  add_headerfiles('src/co.h')
+  add_headerfiles('src/*.h')
 
   add_packages('libsock')
 end)
