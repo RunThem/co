@@ -18,7 +18,7 @@ void echo(int fd) {
       break;
     }
 
-    co_send(fd, buf, size, 0);
+    send(fd, buf, size, 0);
   }
 }
 
@@ -28,7 +28,7 @@ void _main() {
   socklen_t addr_len      = {};
   sock_conf_t conf        = {
              .type     = SOCK_TYPE_INET4_TCP,
-             .host     = "localhost",
+             .host     = "0.0.0.0",
              .port     = 8080,
              .nonblock = true,
              .listen   = 5,
@@ -37,20 +37,45 @@ void _main() {
   sock_open(&conf);
   inf("listen %s:%d, fd is %d", conf.host, conf.port, conf.fd);
 
+  if (conf.fd == -1) {
+    return;
+  }
+
   while (true) {
     cfd = co_accept(conf.fd, (struct sockaddr*)&addr, &addr_len);
     inf("client is %d", cfd);
 
+    if (conf.fd == -1) {
+      return;
+    }
+
     co_new(echo, cfd);
   }
 
-  close(conf.fd);
+  sock_close(&conf);
+}
+
+void fun1() {
+  for (size_t i = 0; i < 100; i++) {
+    printf("1\n");
+    co_yield (3);
+  }
+}
+
+void fun2() {
+  for (size_t i = 0; i < 100; i++) {
+    printf("2\n");
+    co_yield (3);
+  }
 }
 
 int main() {
   co_init();
 
   co_new(_main);
+
+  // co_new(fun1);
+  // co_new(fun2);
 
   co_loop();
 
