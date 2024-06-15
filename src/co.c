@@ -263,7 +263,7 @@ int co_fd_scheduler(void* args) {
   int maxfd              = {};
   fd_set fds[2]          = {};
   fd_set _fds[2]         = {};
-  struct timeval timeout = {.tv_sec = 1, .tv_usec = 200000};
+  struct timeval timeout = {.tv_usec = 50000};
 
   FD_ZERO(&fds[0]);
   FD_ZERO(&fds[0]);
