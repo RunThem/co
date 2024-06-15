@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define inf(fmt, ...) fprintf(stderr, fmt "\n" __VA_OPT__(, ) __VA_ARGS__)
+#define inf(fmt, ...) fprintf(stderr, "[main]: " fmt "\n" __VA_OPT__(, ) __VA_ARGS__)
 
 void echo(int fd) {
   char buf[1024] = {};
@@ -22,7 +22,7 @@ void echo(int fd) {
   }
 }
 
-void _main() {
+void _main(int argc, const char* argv[]) {
   int cfd                 = {};
   struct sockaddr_in addr = {};
   socklen_t addr_len      = {};
@@ -41,7 +41,7 @@ void _main() {
     return;
   }
 
-  while (true) {
+  for (int i = 0; i < 3; i++) {
     cfd = co_accept(conf.fd, (struct sockaddr*)&addr, &addr_len);
     inf("client is %d", cfd);
 
@@ -55,29 +55,6 @@ void _main() {
   sock_close(&conf);
 }
 
-void fun1() {
-  for (size_t i = 0; i < 100; i++) {
-    printf("1\n");
-    co_yield (3);
-  }
-}
-
-void fun2() {
-  for (size_t i = 0; i < 100; i++) {
-    printf("2\n");
-    co_yield (3);
-  }
-}
-
-int main() {
-  co_init();
-
-  co_new(_main);
-
-  // co_new(fun1);
-  // co_new(fun2);
-
-  co_loop();
-
-  return 0;
+int main(int argc, const char* argv[]) {
+  return co_loop(_main, argc, argv);
 }
