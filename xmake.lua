@@ -35,7 +35,7 @@ add_cflags('-Wno-reserved-macro-identifier', '-Wno-reserved-identifier')
 add_cflags('-Werror=vla')
 
 --- Toolchain
-set_toolchains('gcc')
+set_toolchains('clang')
 
 --- Task(lsp) generate the project file
 task('lsp', function()

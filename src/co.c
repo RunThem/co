@@ -24,7 +24,8 @@
 #else /* !NDEBUG */
 #  include <stdio.h>
 
-#  define inf(fmt, ...) fprintf(stderr, fmt "\n" __VA_OPT__(, ) __VA_ARGS__);
+#  define inf(fmt, ...)                                                                            \
+    fprintf(stderr, "[%s:%d]: " fmt "\n", __FUNCTION__, __LINE__ __VA_OPT__(, ) __VA_ARGS__);
 #endif /* !NDEBUG */
 
 #define CO_ARGS_NUM 3 /* rdi, rsi, rdx */
@@ -54,17 +55,20 @@ typedef TAILQ_HEAD(co_list_t, co_t) co_list_t, *co_list_ref_t;
 
 typedef struct {
   size_t id;               /* 协程 id 分配器 */
+  size_t count;            /* 协程个数 */
   reg_t regs[CO_ARGS_NUM]; /* 参数缓存 */
 
-  co_t* run; /* 当前运行的协程 */
-  lfq_t ready;
-  lfq_t dead;
+  co_t* run;   /* 当前运行的协程 */
+  lfq_t ready; /* 就绪队列 */
+  lfq_t dead;  /* 死亡队列 */
 
-  thrd_t fd_thrd; /* 描述符调度器线程 */
-  lfq_t rfds;
-  lfq_t wfds;
+  thrd_t fd_thrd;    /* 描述符调度器线程 */
+  co_list_t fd_wait; /* 等待队列 */
+  lfq_t rfds;        /* read 等待队列 */
+  lfq_t wfds;        /* write 等待队列 */
 } co_loop_t;
 
+static int co_return  = {};
 static jmp_buf ctx    = {};
 static co_loop_t loop = {};
 
@@ -120,115 +124,9 @@ __asm__(".text                                               \n"
         "     jmp *%rax                                      \n");
 
 /*
- * Fd scheduler
- * */
-static int co_fd_scheduler(void* args) {
-  co_t* co               = {};
-  int maxfd              = {};
-  fd_set fds[2]          = {};
-  fd_set _fds[2]         = {};
-  co_list_t wait         = {};
-  struct timeval timeout = {.tv_sec = 1, .tv_usec = 200000};
-
-  FD_ZERO(&fds[0]);
-  FD_ZERO(&fds[0]);
-
-  FD_ZERO(&_fds[0]);
-  FD_ZERO(&_fds[0]);
-
-  TAILQ_INIT(&wait);
-
-  while (true) {
-    /* read */
-    while ((co = lfq_pop(&loop.rfds))) {
-      FD_SET(co->fd, &fds[0]);
-      if (co->fd > maxfd) {
-        maxfd = co->fd;
-      }
-
-      inf("wait rfds %d", co->fd);
-      TAILQ_INSERT_TAIL(&wait, co, next);
-    }
-
-    /* write */
-    while ((co = lfq_pop(&loop.wfds))) {
-      FD_SET(co->fd, &fds[1]);
-      if (co->fd > maxfd) {
-        maxfd = co->fd;
-      }
-
-      inf("wait wfds %d", co->fd);
-      TAILQ_INSERT_TAIL(&wait, co, next);
-    }
-
-    _fds[0] = fds[0];
-    _fds[1] = fds[1];
-
-    if (select(maxfd + 1, &_fds[0], &_fds[1], nullptr, &timeout) == 0) {
-      continue;
-    }
-
-    TAILQ_FOREACH(co, &wait, next) {
-      if (FD_ISSET(co->fd, &_fds[0])) {
-        inf("select rfds is %d", co->fd);
-        TAILQ_REMOVE(&wait, co, next);
-        FD_CLR(co->fd, &fds[0]);
-
-        lfq_put(&loop.ready, co);
-      }
-
-      if (FD_ISSET(co->fd, &_fds[1])) {
-        inf("select wfds is %d", co->fd);
-        TAILQ_REMOVE(&wait, co, next);
-        FD_CLR(co->fd, &fds[1]);
-
-        lfq_put(&loop.ready, co);
-      }
-    }
-  }
-
-  return 0;
-}
-
-int co_accept(int fd, __SOCKADDR_ARG addr, socklen_t* restrict addr_len) {
-  inf("accept fd %d", fd);
-
-  loop.run->fd = fd;
-  lfq_put(&loop.rfds, loop.run);
-
-  co_yield (2);
-  loop.run->fd = CO_INVALID_FD;
-
-  return accept(fd, addr, addr_len);
-}
-
-ssize_t co_recv(int fd, void* buf, size_t n, int flags) {
-  inf("recv fd %d", fd);
-
-  loop.run->fd = fd;
-  lfq_put(&loop.rfds, loop.run);
-
-  co_yield (2);
-  loop.run->fd = CO_INVALID_FD;
-
-  return recv(fd, buf, n, flags);
-}
-
-ssize_t co_send(int fd, const void* buf, size_t n, int flags) {
-  inf("send fd %d", fd);
-
-  loop.run->fd = fd;
-  lfq_put(&loop.wfds, loop.run);
-
-  co_yield (2);
-  loop.run->fd = CO_INVALID_FD;
-
-  return send(fd, buf, n, flags);
-}
-
-/*
  * Core
  * */
+[[gnu::constructor]]
 void co_init() {
   loop.id = 1;
 
@@ -238,7 +136,17 @@ void co_init() {
   lfq_init(&loop.rfds, 1000);
   lfq_init(&loop.wfds, 1000);
 
+  TAILQ_INIT(&loop.fd_wait);
+
+  extern int co_fd_scheduler(void*);
   thrd_create(&loop.fd_thrd, co_fd_scheduler, nullptr);
+}
+
+void co_exit(int code) {
+  co_return  = code;
+  loop.count = 0;
+
+  co_yield (1);
 }
 
 void co_new(void* func, ...) {
@@ -263,7 +171,10 @@ void co_new(void* func, ...) {
   co->args[1] = loop.regs[1];
   co->args[2] = loop.regs[2];
 
-  // TAILQ_INSERT_TAIL(&loop.ready, co, next);
+  loop.count++;
+
+  inf("new {%zu - %zu}", co->id, loop.count);
+
   lfq_put(&loop.ready, co);
 }
 
@@ -273,18 +184,27 @@ void co_yield (int flag) {
   }
 }
 
-void co_loop() {
+int co_loop(void (*start)(int, const char*[]), int argc, const char* argv[]) {
   co_t* co = nullptr;
   int flag = setjmp(ctx);
 
-  /* flag { 0(init), 1(dead), 2(wait), 3(continue) } */
-  if (flag == 1) {
+  /* flag { 0(init), 1(dead), 2(continue), 3(rfd_wait), 4(wfd_wait) } */
+  if (flag == 0) {
+    co_new(start, argc, argv);
+  } else if (flag == 1) {
+    loop.count--;
+    inf("del {%zu - %zu}", loop.run->id, loop.count);
     lfq_put(&loop.dead, loop.run);
-  } else if (flag == 3) {
+  } else if (flag == 2) {
     lfq_put(&loop.ready, loop.run);
+  } else if (flag == 3) {
+    lfq_put(&loop.rfds, loop.run);
+  } else if (flag == 4) {
+    lfq_put(&loop.wfds, loop.run);
   }
 
-  if (lfq_empty(&loop.ready) && lfq_empty(&loop.rfds) && lfq_empty(&loop.wfds)) {
+  if (loop.count == 0) {
+    inf("end");
     goto end;
   }
 
@@ -303,13 +223,120 @@ void co_loop() {
     longjmp(loop.run->ctx, 0);
   }
 
-  inf("end");
-
 end:
+
+  while ((co = lfq_pop(&loop.ready))) {
+    co_free(co);
+  }
+
+  while ((co = lfq_pop(&loop.dead))) {
+    co_free(co);
+  }
+
+  while ((co = lfq_pop(&loop.rfds))) {
+    co_free(co);
+  }
+
+  while ((co = lfq_pop(&loop.wfds))) {
+    co_free(co);
+  }
+
+  while ((co = TAILQ_FIRST(&loop.fd_wait))) {
+    TAILQ_REMOVE(&loop.fd_wait, co, next);
+    co_free(co);
+  }
 
   lfq_cleanup(&loop.ready);
   lfq_cleanup(&loop.dead);
 
   lfq_cleanup(&loop.rfds);
   lfq_cleanup(&loop.wfds);
+
+  return co_return;
+}
+
+/*
+ * Fd scheduler
+ * */
+int co_fd_scheduler(void* args) {
+  co_t* co               = {};
+  int maxfd              = {};
+  fd_set fds[2]          = {};
+  fd_set _fds[2]         = {};
+  struct timeval timeout = {.tv_sec = 1, .tv_usec = 200000};
+
+  FD_ZERO(&fds[0]);
+  FD_ZERO(&fds[0]);
+
+  FD_ZERO(&_fds[0]);
+  FD_ZERO(&_fds[0]);
+
+  while (true) {
+    /* read */
+    while ((co = lfq_pop(&loop.rfds))) {
+      FD_SET(co->fd, &fds[0]);
+      if (co->fd > maxfd) {
+        maxfd = co->fd;
+      }
+
+      inf("wait {%zu} R %d", co->id, co->fd);
+      TAILQ_INSERT_TAIL(&loop.fd_wait, co, next);
+    }
+
+    /* write */
+    while ((co = lfq_pop(&loop.wfds))) {
+      FD_SET(co->fd, &fds[1]);
+      if (co->fd > maxfd) {
+        maxfd = co->fd;
+      }
+
+      inf("wait {%zu} W %d", co->id, co->fd);
+      TAILQ_INSERT_TAIL(&loop.fd_wait, co, next);
+    }
+
+    _fds[0] = fds[0];
+    _fds[1] = fds[1];
+
+    if (select(maxfd + 1, &_fds[0], &_fds[1], nullptr, &timeout) == 0) {
+      continue;
+    }
+
+    TAILQ_FOREACH(co, &loop.fd_wait, next) {
+      if (FD_ISSET(co->fd, &_fds[0])) {
+        inf("select {%zu} R %d", co->id, co->fd);
+        TAILQ_REMOVE(&loop.fd_wait, co, next);
+        FD_CLR(co->fd, &fds[0]);
+
+        lfq_put(&loop.ready, co);
+      }
+
+      if (FD_ISSET(co->fd, &_fds[1])) {
+        inf("select {%zu} W %d", co->id, co->fd);
+        TAILQ_REMOVE(&loop.fd_wait, co, next);
+        FD_CLR(co->fd, &fds[1]);
+
+        lfq_put(&loop.ready, co);
+      }
+    }
+  }
+
+  return 0;
+}
+
+int co_accept(int fd, __SOCKADDR_ARG addr, socklen_t* restrict addr_len) {
+  loop.run->fd = fd;
+  co_yield (3);
+  return accept(fd, addr, addr_len);
+}
+
+ssize_t co_recv(int fd, void* buf, size_t n, int flags) {
+  loop.run->fd = fd;
+  co_yield (3);
+  return recv(fd, buf, n, flags);
+}
+
+ssize_t co_send(int fd, const void* buf, size_t n, int flags) {
+  loop.run->fd = fd;
+  co_yield (4);
+  return send(fd, buf, n, flags);
 }
