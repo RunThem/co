@@ -12,7 +12,7 @@ extern "C" {
 
 extern void co_init();
 extern void co_new(void* func, ...);
-extern void co_yield ();
+extern void co_yield (int flag);
 extern void co_loop();
 
 extern int co_accept(int fd, __SOCKADDR_ARG addr, socklen_t* restrict addr_len);
