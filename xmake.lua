@@ -8,7 +8,7 @@ set_version('0.0.1')
 set_xmakever('2.6.1')
 
 --- Build mode
-add_rules('mode.debug', 'mode.valgrind', 'mode.release')
+add_rules('mode.debug', 'mode.valgrind', 'mode.check', 'mode.release')
 
 --- Macro definition
 add_defines('_GNU_SOURCE=1')
@@ -69,7 +69,7 @@ add_repositories('RunThem https://github.com/RunThem/My-xmake-repo')
 add_includedirs('$(projectdir)/src')
 
 --- Third party library
-add_requires('libsock')
+add_requires('libsock', 'libu')
 
 --- main target
 target('co', function()
@@ -77,7 +77,7 @@ target('co', function()
   add_files('src/co.c')
   add_headerfiles('src/*.h')
 
-  add_packages('libsock')
+  add_packages('libsock', 'libu')
 end)
 
 target('demo', function()
@@ -86,5 +86,5 @@ target('demo', function()
 
   add_deps('co')
 
-  add_packages('libsock')
+  add_packages('libsock', 'libu')
 end)

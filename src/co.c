@@ -1,5 +1,4 @@
 #include "co.h"
-#include "lfq.h"
 
 #include <setjmp.h>
 #include <stdint.h>
@@ -8,29 +7,21 @@
 #include <threads.h>
 #include <unistd.h>
 
-#ifdef CO_USE_MIMALLOC
-#  include <mimalloc.h>
-#  define co_alloc(size) mi_malloc(size)
-#  define co_free(ptr)   mi_free(ptr)
-#else /* !CO_USE_MIMALLOC */
-#  include <stdlib.h>
-#  define co_alloc(size) malloc(size)
-#  define co_free(ptr)   free(ptr)
-#endif /* !CO_USE_MIMALLOC */
+#define u_map_defs  u_defs(map, (int, co_t*))
+#define u_list_defs u_defs(list, co_t)
+#include <u/u.h>
 
-#undef NDEBUG
-#ifdef NDEBUG
-#  define inf(fmt, ...)
-#else /* !NDEBUG */
-#  include <stdio.h>
+#define fd_alloc(fd)                                                                               \
+  ({                                                                                               \
+    int* _fd = u_talloc(int);                                                                      \
+    *_fd     = fd;                                                                                 \
+    _fd;                                                                                           \
+  })
 
-#  define inf(fmt, ...)                                                                            \
-    fprintf(stderr, "[%s:%d]: " fmt "\n", __FUNCTION__, __LINE__ __VA_OPT__(, ) __VA_ARGS__);
-#endif /* !NDEBUG */
-
-#define CO_ARGS_NUM 3 /* rdi, rsi, rdx */
-
+#define CO_ARGS_NUM   3 /* rdi, rsi, rdx */
 #define CO_INVALID_FD -1
+
+#define inf(fmt, ...) u_inf("th(%ld) " fmt, thrd_current() __VA_OPT__(, ) __VA_ARGS__)
 
 /*
  * Typedef
@@ -58,14 +49,15 @@ typedef struct {
   size_t count;            /* 协程个数 */
   reg_t regs[CO_ARGS_NUM]; /* 参数缓存 */
 
-  co_t* run;   /* 当前运行的协程 */
-  lfq_t ready; /* 就绪队列 */
-  lfq_t dead;  /* 死亡队列 */
+  co_t* run;            /* 当前运行的协程 */
+  u_list_t(co_t) ready; /* 就绪队列 */
+  u_list_t(co_t) dead;  /* 死亡队列 */
 
   thrd_t fd_thrd;    /* 描述符调度器线程 */
   co_list_t fd_wait; /* 等待队列 */
-  lfq_t rfds;        /* read 等待队列 */
-  lfq_t wfds;        /* write 等待队列 */
+  u_lfq_t rfds[2];   /* read 等待队列 */
+  u_lfq_t wfds[2];   /* write 等待队列 */
+  u_map_t(int, co_t*) map;
 } co_loop_t;
 
 static int co_return  = {};
@@ -130,13 +122,13 @@ __asm__(".text                                               \n"
 void co_init() {
   loop.id = 1;
 
-  lfq_init(&loop.ready, 1000);
-  lfq_init(&loop.dead, 1000);
-
-  lfq_init(&loop.rfds, 1000);
-  lfq_init(&loop.wfds, 1000);
-
-  TAILQ_INIT(&loop.fd_wait);
+  loop.ready   = u_list_new(co_t);
+  loop.dead    = u_list_new(co_t);
+  loop.rfds[0] = u_lfq_new();
+  loop.wfds[0] = u_lfq_new();
+  loop.rfds[1] = u_lfq_new();
+  loop.wfds[1] = u_lfq_new();
+  loop.map     = u_map_new(int, co_t*);
 
   extern int co_fd_scheduler(void*);
   thrd_create(&loop.fd_thrd, co_fd_scheduler, nullptr);
@@ -159,9 +151,9 @@ void co_new(void* func, ...) {
                    :
                    : "rsi", "rdx", "rcx");
 
-  co = lfq_pop(&loop.dead);
+  co = u_list_pop(loop.dead);
   if (co == nullptr) {
-    co = co_alloc(CO_STACK_SIZE);
+    co = u_zalloc(CO_STACK_SIZE);
   }
 
   co->id      = loop.id++;
@@ -175,7 +167,7 @@ void co_new(void* func, ...) {
 
   inf("new {%zu - %zu}", co->id, loop.count);
 
-  lfq_put(&loop.ready, co);
+  u_list_put(loop.ready, co);
 }
 
 void co_yield (int flag) {
@@ -186,31 +178,66 @@ void co_yield (int flag) {
 
 int co_loop(void (*start)(int, const char*[]), int argc, const char* argv[]) {
   co_t* co = nullptr;
+  int* fd  = nullptr;
   int flag = setjmp(ctx);
 
+  inf("flag is %d", flag);
+
   /* flag { 0(init), 1(dead), 2(continue), 3(rfd_wait), 4(wfd_wait) } */
-  if (flag == 0) {
-    co_new(start, argc, argv);
-  } else if (flag == 1) {
-    loop.count--;
-    inf("del {%zu - %zu}", loop.run->id, loop.count);
-    lfq_put(&loop.dead, loop.run);
-  } else if (flag == 2) {
-    lfq_put(&loop.ready, loop.run);
-  } else if (flag == 3) {
-    lfq_put(&loop.rfds, loop.run);
-  } else if (flag == 4) {
-    lfq_put(&loop.wfds, loop.run);
+  switch (flag) {
+    case 0: co_new(start, argc, argv); break;
+
+    case 1:
+      loop.count--;
+      u_list_put(loop.dead, loop.run);
+      inf("del {%zu - %zu}", loop.run->id, loop.count);
+      break;
+
+    case 2: u_list_put(loop.ready, loop.run); break;
+
+    case 3:
+      u_map_put(loop.map, loop.run->fd, loop.run);
+      u_lfq_put(loop.rfds[0], fd_alloc(loop.run->fd));
+      break;
+
+    case 4:
+      u_map_put(loop.map, loop.run->fd, loop.run);
+      u_lfq_put(loop.wfds[0], fd_alloc(loop.run->fd));
+      break;
+
+    default: u_err("flag is %d, error", flag); goto end;
   }
 
   if (loop.count == 0) {
-    inf("end");
     goto end;
   }
 
+  inf("ready size is %zu", u_list_len(loop.ready));
+
+  loop.run = nullptr;
   do {
-    loop.run = lfq_pop(&loop.ready);
+    loop.run = u_list_pop(loop.ready);
+
+    if (loop.run == nullptr) {
+      while ((fd = u_lfq_pop(loop.rfds[1]))) {
+        co = u_map_pop(loop.map, *fd);
+        u_list_put(loop.ready, co);
+        inf("poll R %d", *fd);
+
+        u_free(fd);
+      }
+
+      while ((fd = u_lfq_pop(loop.wfds[1]))) {
+        co = u_map_pop(loop.map, *fd);
+        u_list_put(loop.ready, co);
+        inf("poll W %d", *fd);
+
+        u_free(fd);
+      }
+    }
   } while (loop.run == nullptr);
+
+  inf("run %p, %zu", loop.run, loop.run->id);
 
   if (!loop.run->stack) {
     loop.run->stack = (void*)loop.run + CO_STACK_SIZE - 16;
@@ -224,33 +251,7 @@ int co_loop(void (*start)(int, const char*[]), int argc, const char* argv[]) {
   }
 
 end:
-
-  while ((co = lfq_pop(&loop.ready))) {
-    co_free(co);
-  }
-
-  while ((co = lfq_pop(&loop.dead))) {
-    co_free(co);
-  }
-
-  while ((co = lfq_pop(&loop.rfds))) {
-    co_free(co);
-  }
-
-  while ((co = lfq_pop(&loop.wfds))) {
-    co_free(co);
-  }
-
-  while ((co = TAILQ_FIRST(&loop.fd_wait))) {
-    TAILQ_REMOVE(&loop.fd_wait, co, next);
-    co_free(co);
-  }
-
-  lfq_cleanup(&loop.ready);
-  lfq_cleanup(&loop.dead);
-
-  lfq_cleanup(&loop.rfds);
-  lfq_cleanup(&loop.wfds);
+  inf("end");
 
   return co_return;
 }
@@ -259,11 +260,12 @@ end:
  * Fd scheduler
  * */
 int co_fd_scheduler(void* args) {
-  co_t* co               = {};
+  int* _fd               = {};
+  int fd                 = {};
   int maxfd              = {};
   fd_set fds[2]          = {};
   fd_set _fds[2]         = {};
-  struct timeval timeout = {.tv_usec = 50000};
+  struct timeval timeout = {.tv_usec = 5'0000};
 
   FD_ZERO(&fds[0]);
   FD_ZERO(&fds[0]);
@@ -273,25 +275,23 @@ int co_fd_scheduler(void* args) {
 
   while (true) {
     /* read */
-    while ((co = lfq_pop(&loop.rfds))) {
-      FD_SET(co->fd, &fds[0]);
-      if (co->fd > maxfd) {
-        maxfd = co->fd;
-      }
+    while ((_fd = u_lfq_pop(loop.rfds[0]))) {
+      fd = *_fd;
+      u_free(_fd);
 
-      inf("wait {%zu} R %d", co->id, co->fd);
-      TAILQ_INSERT_TAIL(&loop.fd_wait, co, next);
+      FD_SET(fd, &fds[0]);
+      maxfd = max(maxfd, fd);
+      inf("wait R %d", fd);
     }
 
     /* write */
-    while ((co = lfq_pop(&loop.wfds))) {
-      FD_SET(co->fd, &fds[1]);
-      if (co->fd > maxfd) {
-        maxfd = co->fd;
-      }
+    while ((_fd = u_lfq_pop(loop.wfds[0]))) {
+      fd = *_fd;
+      u_free(_fd);
 
-      inf("wait {%zu} W %d", co->id, co->fd);
-      TAILQ_INSERT_TAIL(&loop.fd_wait, co, next);
+      FD_SET(fd, &fds[1]);
+      maxfd = max(maxfd, fd);
+      inf("wait W %d", fd);
     }
 
     _fds[0] = fds[0];
@@ -301,21 +301,17 @@ int co_fd_scheduler(void* args) {
       continue;
     }
 
-    TAILQ_FOREACH(co, &loop.fd_wait, next) {
-      if (FD_ISSET(co->fd, &_fds[0])) {
-        inf("select {%zu} R %d", co->id, co->fd);
-        TAILQ_REMOVE(&loop.fd_wait, co, next);
-        FD_CLR(co->fd, &fds[0]);
+    u_each (i, maxfd + 1) {
+      if (FD_ISSET(i, &_fds[0])) {
+        FD_CLR(i, &fds[0]);
 
-        lfq_put(&loop.ready, co);
+        u_lfq_put(loop.rfds[1], fd_alloc(i));
       }
 
-      if (FD_ISSET(co->fd, &_fds[1])) {
-        inf("select {%zu} W %d", co->id, co->fd);
-        TAILQ_REMOVE(&loop.fd_wait, co, next);
-        FD_CLR(co->fd, &fds[1]);
+      if (FD_ISSET(i, &_fds[1])) {
+        FD_CLR(i, &fds[1]);
 
-        lfq_put(&loop.ready, co);
+        u_lfq_put(loop.wfds[1], fd_alloc(i));
       }
     }
   }
