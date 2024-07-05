@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 #define u_map_defs  u_defs(map, (int, co_t*))
-#define u_list_defs u_defs(list, co_t)
+#define u_list_defs u_defs(list, co_t*)
 #include <u/u.h>
 
 #define fd_alloc(fd)                                                                               \
@@ -49,9 +49,9 @@ typedef struct {
   size_t count;            /* 协程个数 */
   reg_t regs[CO_ARGS_NUM]; /* 参数缓存 */
 
-  co_t* run;            /* 当前运行的协程 */
-  u_list_t(co_t) ready; /* 就绪队列 */
-  u_list_t(co_t) dead;  /* 死亡队列 */
+  co_t* run;             /* 当前运行的协程 */
+  u_list_t(co_t*) ready; /* 就绪队列 */
+  u_list_t(co_t*) dead;  /* 死亡队列 */
 
   thrd_t fd_thrd;    /* 描述符调度器线程 */
   co_list_t fd_wait; /* 等待队列 */
@@ -122,8 +122,8 @@ __asm__(".text                                               \n"
 void co_init() {
   loop.id = 1;
 
-  loop.ready   = u_list_new(co_t);
-  loop.dead    = u_list_new(co_t);
+  loop.ready   = u_list_new(co_t*);
+  loop.dead    = u_list_new(co_t*);
   loop.rfds[0] = u_lfq_new();
   loop.wfds[0] = u_lfq_new();
   loop.rfds[1] = u_lfq_new();
@@ -265,7 +265,7 @@ int co_fd_scheduler(void* args) {
   int maxfd              = {};
   fd_set fds[2]          = {};
   fd_set _fds[2]         = {};
-  struct timeval timeout = {.tv_usec = 5'0000};
+  struct timeval timeout = {.tv_usec = 10'0000};
 
   FD_ZERO(&fds[0]);
   FD_ZERO(&fds[0]);
